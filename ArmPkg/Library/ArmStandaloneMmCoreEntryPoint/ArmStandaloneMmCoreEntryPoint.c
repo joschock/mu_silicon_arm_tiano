@@ -35,6 +35,7 @@
 #include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/SerialPortLib.h>
+#include <Library/ArmMmuLib.h>
 #include <Library/ArmStandaloneMmMmuLib.h> // MU_CHANGE
 #include <Library/PcdLib.h>
 
@@ -609,6 +610,47 @@ DumpPhitHob (
   }
 }
 
+STATIC
+EFI_STATUS
+ConfigureHeapPermissions (
+  IN VOID  *HobStart
+  )
+{
+  EFI_HOB_GUID_TYPE               *GuidHob;
+  EFI_MMRAM_HOB_DESCRIPTOR_BLOCK  *MmramRangesHobData;
+  UINTN                           Idx;
+
+  GuidHob = GetNextGuidHob (&gEfiMmPeiMmramMemoryReserveGuid, HobStart);
+  if (GuidHob == NULL) {
+    DEBUG ((DEBUG_ERROR, "Error: No Pei Mmram Memory Reserved Guid Hob is present.\n"));
+    return EFI_NOT_FOUND;
+  }
+
+  MmramRangesHobData = GET_GUID_HOB_DATA (GuidHob);
+  if ((MmramRangesHobData == NULL) ||
+      (MmramRangesHobData->NumberOfMmReservedRegions == 0))
+  {
+    DEBUG ((DEBUG_ERROR, "Error: No Pei Mmram Memory Reserved information is present.\n"));
+    return EFI_NOT_FOUND;
+  }
+
+  for (Idx = 0; Idx < MmramRangesHobData->NumberOfMmReservedRegions; Idx++) {
+    if ((MmramRangesHobData->Descriptor[Idx].RegionState & (EFI_ALLOCATED | EFI_NEEDS_TESTING | EFI_NEEDS_ECC_INITIALIZATION)) != 0) {
+      continue;
+    }
+
+    DEBUG ((DEBUG_INFO, "Setting RW permissions for heap descriptor at 0x%lx size 0x%lx\n", MmramRangesHobData->Descriptor[Idx].CpuStart, MmramRangesHobData->Descriptor[Idx].PhysicalSize));
+    ArmSetMemoryAttributes (
+      MmramRangesHobData->Descriptor[Idx].CpuStart,
+      MmramRangesHobData->Descriptor[Idx].PhysicalSize,
+      EFI_MEMORY_XP, // RW-XP
+      (EFI_MEMORY_RO | EFI_MEMORY_RP | EFI_MEMORY_XP)
+      );
+  }
+
+  return EFI_SUCCESS;
+}
+
 /**
   Convert EFI_STATUS to MM SPM return code.
 
@@ -1081,6 +1123,14 @@ CEntryPoint (
 
     Status = PeCoffLoaderRelocateImage (&ImageContext);
     ASSERT_EFI_ERROR (Status);
+  }
+
+  //
+  // Configure Heap Permissions
+  //
+  Status = ConfigureHeapPermissions (HobStart);
+  if (EFI_ERROR (Status)) {
+    goto finish;
   }
 
   // Set the gHobList to point to the HOB list passed by TF-A.
